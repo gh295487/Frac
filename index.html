@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mandelbrot Explorer</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+    font: 13px/1.4 system-ui, -apple-system, sans-serif;
+  }
+  #view {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  #panel {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+    max-width: calc(100vw - 24px);
+    padding: 8px 14px;
+    border-radius: 10px;
+    background: rgba(8, 10, 16, 0.72);
+    color: #dfe6f0;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    user-select: none;
+  }
+  #panel label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  #panel .muted { color: #8b93a3; }
+  select, button {
+    font: inherit;
+    color: #dfe6f0;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 6px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  select:hover, button:hover { background: rgba(255, 255, 255, 0.16); }
+  button:active { transform: translateY(1px); }
+  input[type="range"] {
+    width: 130px;
+    accent-color: #7aa2ff;
+  }
+  #iters {
+    min-width: 4ch;
+    display: inline-block;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  #hint {
+    position: fixed;
+    right: 14px;
+    bottom: 12px;
+    color: #79808f;
+    font-size: 12px;
+    text-align: right;
+    user-select: none;
+    pointer-events: none;
+  }
+  #stats {
+    position: fixed;
+    left: 14px;
+    bottom: 12px;
+    color: #79808f;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+    pointer-events: none;
+  }
+  @media (max-width: 640px) {
+    #hint { display: none; }
+    input[type="range"] { width: 90px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="panel">
+  <label><span class="muted">Location</span>
+    <select id="preset"></select>
+  </label>
+  <label><span class="muted">Iterations</span>
+    <input id="iter" type="range" min="50" max="2000" step="25" value="200">
+    <span id="iters">200</span>
+  </label>
+  <label><span class="muted">Palette</span>
+    <select id="palette">
+      <option value="ocean" selected>Deep Ocean</option>
+      <option value="ember">Ember</option>
+      <option value="iris">Iris</option>
+      <option value="mono">Monochrome</option>
+    </select>
+  </label>
+  <button id="reset" title="Return to the overview">Reset view</button>
+</div>
+
+<div id="stats"></div>
+<div id="hint">click zoom in &middot; right-click zoom out &middot; drag pan &middot; scroll zoom</div>
+
+<script type="text/worker" id="worker-src">
+'use strict';
+
+let currentId = 0;
+
+self.onmessage = (e) => {
+  const m = e.data;
+  if (m && m.type === 'job') {
+    currentId = m.id;
+    run(m);
+  }
+};
+
+function run(job) {
+  let passIndex = 0;
+
+  const nextPass = () => {
+    if (currentId !== job.id || passIndex >= job.passes.length) return;
+    const factor = job.passes[passIndex++];
+    const pw = Math.max(2, Math.round(job.w / factor));
+    const ph = Math.max(2, Math.round(job.h / factor));
+    const buf = new Float32Array(pw * ph);
+
+    const dx = (job.scale * job.w) / pw;
+    const dy = (job.scale * job.h) / ph;
+    const x0 = job.cx - (job.scale * job.w) / 2;
+    const y0 = job.cy - (job.scale * job.h) / 2;
+    const maxIter = job.maxIter;
+    const LN2 = Math.LN2;
+    const BAILOUT = 65536;
+
+    let row = 0;
+    const step = () => {
+      if (currentId !== job.id) return;
+      const end = Math.min(ph, row + 16);
+      for (; row < end; row++) {
+        const ci = y0 + dy * (row + 0.5);
+        const base = row * pw;
+        for (let x = 0; x < pw; x++) {
+          const cr = x0 + dx * (x + 0.5);
+
+          const q = (cr - 0.25) * (cr - 0.25) + ci * ci;
+          if (q * (q + (cr - 0.25)) <= 0.25 * ci * ci ||
+              (cr + 1) * (cr + 1) + ci * ci <= 0.0625) {
+            buf[base + x] = -1;
+            continue;
+          }
+
+          let zr = 0, zi = 0, i = 0;
+          let zr2 = 0, zi2 = 0;
+          while (i < maxIter) {
+            zi = 2 * zr * zi + ci;
+            zr = zr2 - zi2 + cr;
+            zr2 = zr * zr;
+            zi2 = zi * zi;
+            if (zr2 + zi2 > BAILOUT) break;
+            i++;
+          }
+          if (i >= maxIter) {
+            buf[base + x] = -1;
+          } else {
+            const mod = Math.sqrt(zr2 + zi2);
+            buf[base + x] = i + 1 - Math.log(Math.log(mod) / LN2) / LN2;
+          }
+        }
+      }
+      if (row < ph) {
+        setTimeout(step, 0);
+      } else {
+        const copy = buf.slice();
+        postMessage({ type: 'pass', id: job.id, factor, pw, ph, buf: copy.buffer }, [copy.buffer]);
+        setTimeout(nextPass, 0);
+      }
+    };
+    step();
+  };
+
+  nextPass();
+}
+</script>
+
+<script>
+'use strict';
+
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d', { alpha: false });
+const presetSel = document.getElementById('preset');
+const iterSlider = document.getElementById('iter');
+const itersLabel = document.getElementById('iters');
+const paletteSel = document.getElementById('palette');
+const resetBtn = document.getElementById('reset');
+const statsEl = document.getElementById('stats');
+
+const PRESETS = {
+  'Overview':        { cx: -0.6,                  cy: 0.0,                   span: 2.6,    iter: 200 },
+  'Seahorse Valley': { cx: -0.7436438870371587,   cy: 0.13182590420531197,   span: 0.014,  iter: 400 },
+  'Elephant Valley': { cx: 0.2925755,             cy: -0.0149977,            span: 0.008,  iter: 500 },
+  'Double Spiral':   { cx: -0.7268953477091141,   cy: 0.18888712904384595,   span: 2e-4,   iter: 800 },
+  'Mini Mandelbrot': { cx: -1.7499983908917,      cy: 0.0,                   span: 1.6e-5, iter: 1200 },
+  'Dendrite':        { cx: -0.235125,             cy: 0.827215,              span: 0.06,   iter: 300 },
+  'Triple Spiral':   { cx: -0.088,                cy: 0.654,                 span: 0.04,   iter: 300 }
+};
+
+const PALETTES = {
+  ocean: { a: [0.23, 0.30, 0.47], b: [0.35, 0.30, 0.32], c: [1.0, 1.0, 1.0], d: [0.00, 0.12, 0.28] },
+  ember: { a: [0.42, 0.22, 0.18], b: [0.42, 0.30, 0.22], c: [1.0, 1.0, 1.0], d: [0.05, 0.15, 0.30] },
+  iris:  { a: [0.30, 0.26, 0.42], b: [0.35, 0.28, 0.38], c: [1.0, 1.0, 1.0], d: [0.55, 0.40, 0.20] },
+  mono:  { a: [0.35, 0.37, 0.40], b: [0.35, 0.35, 0.35], c: [1.0, 1.0, 1.0], d: [0.10, 0.10, 0.10] }
+};
+
+const MIN_SCALE = 4e-15;
+const PASSES = [8, 4, 2, 1];
+
+const workerSrc = document.getElementById('worker-src').textContent;
+const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
+
+const view = { cx: 0, cy: 0, scale: 1 };
+let homeSpan = 2.6;
+let jobId = 0;
+let pendingRender = 0;
+let iterBuf = null;
+let iterW = 0;
+let iterH = 0;
+
+const snap = document.createElement('canvas');
+const snapCtx = snap.getContext('2d');
+const scratch = document.createElement('canvas');
+const scratchCtx = scratch.getContext('2d', { alpha: false });
+
+for (const name of Object.keys(PRESETS)) {
+  const opt = document.createElement('option');
+  opt.value = name;
+  opt.textContent = name;
+  presetSel.appendChild(opt);
+}
+
+function span() {
+  return view.scale * canvas.height;
+}
+
+function effectiveIter() {
+  const base = Number(iterSlider.value);
+  const depth = Math.max(0, Math.log2(homeSpan / span()));
+  return Math.min(5000, Math.round(base + depth * 60));
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const w = Math.max(2, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(2, Math.round(canvas.clientHeight * dpr));
+  if (w === canvas.width && h === canvas.height) return;
+  const oldSpan = span();
+  canvas.width = w;
+  canvas.height = h;
+  snap.width = w;
+  snap.height = h;
+  if (oldSpan > 0) view.scale = Math.max(MIN_SCALE, oldSpan / h);
+  scheduleRender();
+}
+
+function setView(p) {
+  view.cx = p.cx;
+  view.cy = p.cy;
+  homeSpan = p.span;
+  view.scale = p.span / canvas.height;
+  iterSlider.value = p.iter;
+  itersLabel.textContent = p.iter;
+  iterBuf = null;
+  scheduleRender();
+}
+
+function scheduleRender() {
+  if (pendingRender) return;
+  pendingRender = requestAnimationFrame(() => {
+    pendingRender = 0;
+    startRender();
+  });
+}
+
+function startRender() {
+  jobId++;
+  worker.postMessage({
+    type: 'job',
+    id: jobId,
+    w: canvas.width,
+    h: canvas.height,
+    cx: view.cx,
+    cy: view.cy,
+    scale: view.scale,
+    maxIter: effectiveIter(),
+    passes: PASSES
+  });
+}
+
+function paletteColor(t, out) {
+  const p = PALETTES[paletteSel.value];
+  const tau = Math.PI * 2;
+  for (let k = 0; k < 3; k++) {
+    out[k] = p.a[k] + p.b[k] * Math.cos(tau * (p.c[k] * t + p.d[k]));
+  }
+}
+
+function drawPass(m) {
+  scratch.width = m.pw;
+  scratch.height = m.ph;
+  const img = scratchCtx.createImageData(m.pw, m.ph);
+  const px = img.data;
+  const buf = new Float32Array(m.buf);
+  const rgb = [0, 0, 0];
+  const freq = 0.012;
+  for (let i = 0, j = 0; i < buf.length; i++, j += 4) {
+    const mu = buf[i];
+    if (mu < 0) {
+      px[j + 3] = 255;
+      continue;
+    }
+    paletteColor((mu * freq) % 1, rgb);
+    px[j] = rgb[0] * 255;
+    px[j + 1] = rgb[1] * 255;
+    px[j + 2] = rgb[2] * 255;
+    px[j + 3] = 255;
+  }
+  scratchCtx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = m.pw !== canvas.width;
+  ctx.drawImage(scratch, 0, 0, m.pw, m.ph, 0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = true;
+  snapCtx.drawImage(canvas, 0, 0);
+}
+
+function recolor() {
+  if (!iterBuf) return;
+  drawPass({ pw: iterW, ph: iterH, buf: iterBuf.buffer, isFinal: true });
+}
+
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (!m || m.type !== 'pass' || m.id !== jobId) return;
+  drawPass(m);
+  if (m.factor === 1) {
+    iterBuf = new Float32Array(m.buf);
+    iterW = m.pw;
+    iterH = m.ph;
+    updateStats();
+  }
+};
+
+function updateStats() {
+  const zoom = homeSpan / span();
+  const ztxt = zoom >= 1000 ? zoom.toExponential(2) : zoom.toFixed(2);
+  statsEl.textContent =
+    're ' + view.cx.toFixed(12) + '  im ' + view.cy.toFixed(12) +
+    '  \u00d7' + ztxt + '  \u00b7  ' + effectiveIter() + ' iters';
+}
+
+function zoomAt(px, py, f) {
+  const ns = Math.min(homeSpan / canvas.height * 8, Math.max(MIN_SCALE, view.scale * f));
+  f = ns / view.scale;
+  const x0 = view.cx - view.scale * canvas.width / 2;
+  const y0 = view.cy - view.scale * canvas.height / 2;
+  const mx = x0 + px * view.scale;
+  const my = y0 + py * view.scale;
+  view.scale = ns;
+  view.cx = mx + (view.cx - mx) * f;
+  view.cy = my + (view.cy - my) * f;
+  scheduleRender();
+}
+
+let dragging = false;
+let moved = false;
+let downX = 0, downY = 0, lastX = 0, lastY = 0;
+let downButton = 0;
+const CLICK_SLOP = 5;
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  dragging = true;
+  moved = false;
+  downButton = e.button;
+  downX = lastX = e.clientX;
+  downY = lastY = e.clientY;
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const dpr = canvas.width / canvas.clientWidth;
+  const dx = (e.clientX - lastX) * dpr;
+  const dy = (e.clientY - lastY) * dpr;
+  lastX = e.clientX;
+  lastY = e.clientY;
+  if (Math.abs(e.clientX - downX) > CLICK_SLOP || Math.abs(e.clientY - downY) > CLICK_SLOP) moved = true;
+  if (!moved) return;
+  view.cx -= dx * view.scale;
+  view.cy -= dy * view.scale;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(snap, dx, dy);
+  updateStats();
+});
+
+canvas.addEventListener('pointerup', (e) => {
+  if (!dragging) return;
+  dragging = false;
+  const isClick = !moved;
+  if (isClick) {
+    const dpr = canvas.width / canvas.clientWidth;
+    const px = (e.clientX - canvas.getBoundingClientRect().left) * dpr;
+    const py = (e.clientY - canvas.getBoundingClientRect().top) * dpr;
+    if (downButton === 2 || e.shiftKey) {
+      zoomAt(px, py, 2);
+    } else if (downButton === 0) {
+      zoomAt(px, py, 0.5);
+    }
+  } else {
+    scheduleRender();
+  }
+});
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const dpr = canvas.width / canvas.clientWidth;
+  const rect = canvas.getBoundingClientRect();
+  const px = (e.clientX - rect.left) * dpr;
+  const py = (e.clientY - rect.top) * dpr;
+  zoomAt(px, py, Math.exp(e.deltaY * 0.0012));
+}, { passive: false });
+
+iterSlider.addEventListener('input', () => {
+  itersLabel.textContent = iterSlider.value;
+  scheduleRender();
+});
+
+paletteSel.addEventListener('change', () => {
+  if (iterBuf) recolor();
+});
+
+presetSel.addEventListener('change', () => {
+  setView(PRESETS[presetSel.value]);
+});
+
+resetBtn.addEventListener('click', () => {
+  presetSel.value = 'Overview';
+  setView(PRESETS['Overview']);
+});
+
+window.addEventListener('resize', resize);
+
+resize();
+setView(PRESETS['Overview']);
+presetSel.value = 'Overview';
+</script>
+</body>
+</html>
